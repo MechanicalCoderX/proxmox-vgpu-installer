@@ -562,7 +562,7 @@ case $STEP in
                 run_command "Updating GRUB" "info" "update-grub"
             }
 
-            if [ "$choice" -eq 1000 ]; then
+            if [ "$choice" -eq 1 ]; then
                 # Check the value of VGPU_SUPPORT
                 if [ "$VGPU_SUPPORT" = "No" ]; then
                     echo -e "${RED}[!]${NC} You don't have a vGPU capable card in your system"
