@@ -9,7 +9,7 @@ STEP="${STEP:-1}"
 URL="${URL:-}"
 FILE="${FILE:-}"
 DRIVER_VERSION="${DRIVER_VERSION:-}"
-SCRIPT_VERSION=1.1
+SCRIPT_VERSION=1.2
 VGPU_DIR=$(pwd)
 VGPU_SUPPORT="${VGPU_SUPPORT:-}"
 DRIVER_VERSION="${DRIVER_VERSION:-}"
@@ -101,32 +101,17 @@ major_version=$(echo "$version" | sed 's/\([0-9]*\).*/\1/')
 # Function to map filename to driver version and patch
 map_filename_to_version() {
     local filename="$1"
-    if [[ "$filename" =~ ^(NVIDIA-Linux-x86_64-535\.54\.06-vgpu-kvm\.run|NVIDIA-Linux-x86_64-535\.104\.06-vgpu-kvm\.run|NVIDIA-Linux-x86_64-535\.129\.03-vgpu-kvm\.run|NVIDIA-Linux-x86_64-535\.161\.05-vgpu-kvm\.run|NVIDIA-Linux-x86_64-550\.54\.10-vgpu-kvm\.run)$ ]]; then
+    if [[ "$filename" =~ ^(NVIDIA-Linux-x86_64-535\.230\.02-vgpu-kvm\.run|NVIDIA-Linux-x86_64-550\.144\.02-vgpu-kvm\.run)$ ]]; then
         case "$filename" in
-            NVIDIA-Linux-x86_64-535.54.06-vgpu-kvm.run)
-                driver_version="16.0"
-                driver_patch="535.54.06.patch"
-                md5="b892f75f8522264bc176f5a555acb176"
+            NVIDIA-Linux-x86_64-535.230.02-vgpu-kvm.run)
+                driver_version="16.9"
+                driver_patch="535.230.02.patch"
+                sha256="8303ba7b253ffb831a4dca079c688928a921344a72c8acd4812e2bfa82c7c2c5"
                 ;;
-            NVIDIA-Linux-x86_64-535.104.06-vgpu-kvm.run)
-                driver_version="16.1"
-                driver_patch="535.104.06.patch"
-                md5="1020ad5b89fa0570c27786128385ca48"
-                ;;
-            NVIDIA-Linux-x86_64-535.129.03-vgpu-kvm.run)
-                driver_version="16.2"
-                driver_patch="535.129.03.patch"
-                md5="0048208a62bacd2a7dd12fa736aa5cbb"
-                ;;
-            NVIDIA-Linux-x86_64-535.161.05-vgpu-kvm.run)
-                driver_version="16.4"
-                driver_patch="535.161.05.patch"
-                md5="bad6e09aeb58942750479f091bb9c4b6"
-                ;;
-            NVIDIA-Linux-x86_64-550.54.10-vgpu-kvm.run)
-                driver_version="17.0"
-                driver_patch="550.54.10.patch"
-                md5="5f5e312cbd5bb64946e2a1328a98c08d"
+            NVIDIA-Linux-x86_64-550.144.02-vgpu-kvm.run)
+                driver_version="17.5"
+                driver_patch="550.144.02.patch"
+                sha256="626a66d989d8cc3e1945a681a458e64470242c525bfcaa5ce4f59a35070579ec"
                 ;;
         esac
         return 0  # Return true
@@ -136,65 +121,102 @@ map_filename_to_version() {
 }
 
 # License the vGPU
-configure_fastapi_dls() {
+configure_fastapi_dls_lxc() {
     echo ""
     read -p "$(echo -e "${BLUE}[?]${NC} Do you want to license the vGPU? (y/n): ")" choice
     echo ""
 
-    if [ "$choice" = "y" ]; then
-        # Installing Docker-CE
-        run_command "Installing Docker-CE" "info" "apt install ca-certificates curl -y; \
-        curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
-        chmod a+r /etc/apt/keyrings/docker.asc; \
-        echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \$(. /etc/os-release && echo \$VERSION_CODENAME) stable\" | \
-        tee /etc/apt/sources.list.d/docker.list > /dev/null; \
-        apt update; \
-        apt install docker-ce docker-compose -y"
-
-        # Docker pull FastAPI-DLS
-        run_command "Docker pull FastAPI-DLS" "info" "docker pull collinwebdesigns/fastapi-dls:latest; \
-        working_dir=/opt/docker/fastapi-dls/cert; \
-        mkdir -p \$working_dir; \
-        cd \$working_dir; \
-        openssl genrsa -out \$working_dir/instance.private.pem 2048; \
-        openssl rsa -in \$working_dir/instance.private.pem -outform PEM -pubout -out \$working_dir/instance.public.pem; \
-        echo -e '\n\n\n\n\n\n\n' | openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout \$working_dir/webserver.key -out \$working_dir/webserver.crt; \
-        docker volume create dls-db"
-
-        # Get the timezone of the Proxmox server
-        timezone=$(timedatectl | grep 'Time zone' | awk '{print $3}')
-
-        # Get the hostname of the Proxmox server
-        hostname=$(hostname -i)
-
-        fastapi_dir=~/fastapi-dls
-        mkdir -p $fastapi_dir
-
-        # Ask for desired port number here
+    if [ "$choice" != "y" ]; then
         echo ""
-        read -p "$(echo -e "${BLUE}[?]${NC} Enter the desired port number for FastAPI-DLS (default is 8443): ")" portnumber
-        portnumber=${portnumber:-8443}
-        echo -e "${RED}[!]${NC} Don't use port 80 or 443 since Proxmox is using those ports"
+        echo "Exiting script."
+        echo "Install the Docker container in a VM/LXC yourself:"
+        echo "https://git.collinwebdesigns.de/oscar.krause/fastapi-dls#docker"
         echo ""
+        exit 0
+    fi
 
-        echo -e "${GREEN}[+]${NC} Generate Docker YAML compose file"
-        # Generate the Docker Compose YAML file
-        cat > "$fastapi_dir/docker-compose.yml" <<EOF
+    # Determine next available CTID starting at 9001
+    CTID=9001
+    while pct status $CTID &>/dev/null; do
+        ((CTID++))
+    done
+    echo -e "${GREEN}[+]${NC} Using next available CTID: $CTID"
+
+    # Detect available container storage pools
+    mapfile -t STORAGE_OPTIONS < <(pvesm status --storage | awk '/container/ {print $1}')
+    STORAGE_COUNT=${#STORAGE_OPTIONS[@]}
+
+    if [[ $STORAGE_COUNT -eq 0 ]]; then
+        echo -e "${RED}[!]${NC} No suitable container storage found (type=container)."
+        exit 1
+    elif [[ $STORAGE_COUNT -eq 1 ]]; then
+        STORAGE="${STORAGE_OPTIONS[0]}"
+        echo -e "${GREEN}[+]${NC} Automatically selected container storage: $STORAGE"
+    else
+        echo -e "${BLUE}[?]${NC} Multiple container storages found:"
+        select opt in "${STORAGE_OPTIONS[@]}"; do
+            if [[ -n "$opt" ]]; then
+                STORAGE="$opt"
+                break
+            else
+                echo -e "${RED}[!]${NC} Invalid selection."
+            fi
+        done
+    fi
+
+    HOSTNAME="fastapi-dls"
+    TEMPLATE="local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+
+    # Create LXC container
+    run_command "Creating LXC container for FastAPI-DLS (CTID=$CTID)" "info" \
+        "pct create $CTID $TEMPLATE --hostname $HOSTNAME --cores 2 --memory 1024 --swap 512 \
+         --net0 name=eth0,bridge=vmbr0,ip=dhcp --rootfs $STORAGE:4 \
+         --unprivileged 0 --features nesting=1 \
+         --start 1"
+
+    # Wait and fetch container IP
+    echo -e "${YELLOW}[*]${NC} Waiting for container to get an IP address..."
+    sleep 10
+    CT_IP=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+    echo -e "${GREEN}[+]${NC} Container IP: $CT_IP"
+
+    # Prompt for port
+    echo ""
+    read -p "$(echo -e "${BLUE}[?]${NC} Enter the desired port number for FastAPI-DLS (default is 443): ")" portnumber
+    portnumber=${portnumber:-443}
+    echo ""
+
+    # Install Docker and FastAPI-DLS in the LXC container
+    run_command "Installing Docker & FastAPI-DLS in CT$CTID" "info" "
+        apt update && apt install -y curl ca-certificates gnupg lsb-release openssl && \
+        mkdir -p /etc/apt/keyrings && \
+        curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+        echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+        https://download.docker.com/linux/debian \$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list && \
+        apt update && apt install -y docker-ce docker-compose"
+
+    pct exec $CTID -- bash -c "mkdir -p /opt/docker/fastapi-dls/cert && cd /opt/docker/fastapi-dls/cert && \
+        openssl genrsa -out instance.private.pem 2048 && \
+        openssl rsa -in instance.private.pem -outform PEM -pubout -out instance.public.pem && \
+        echo -e '\n\n\n\n\n\n\n' | openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout webserver.key -out webserver.crt"
+
+    timezone=$(timedatectl | grep 'Time zone' | awk '{print $3}')
+    compose_yaml=$(cat <<EOF
 version: '3.9'
-
 x-dls-variables: &dls-variables
   TZ: $timezone
-  DLS_URL: $hostname
+  DLS_URL: $CT_IP
   DLS_PORT: $portnumber
-  LEASE_EXPIRE_DAYS: 90  # 90 days is maximum
+  LEASE_EXPIRE_DAYS: 90
   DATABASE: sqlite:////app/database/db.sqlite
   DEBUG: "false"
 
 services:
-  wvthoog-fastapi-dls:
+  fastapi-dls:
     image: collinwebdesigns/fastapi-dls:latest
     restart: always
-    container_name: wvthoog-fastapi-dls
+    container_name: fastapi-dls
     environment:
       <<: *dls-variables
     ports:
@@ -202,60 +224,35 @@ services:
     volumes:
       - /opt/docker/fastapi-dls/cert:/app/cert
       - dls-db:/app/database
-    logging:  # optional, for those who do not need logs
-      driver: "json-file"
-      options:
-        max-file: "5"
-        max-size: "10m"
 
 volumes:
   dls-db:
 EOF
-        # Issue docker-compose
-        run_command "Running Docker Compose" "info" "docker-compose -f \"$fastapi_dir/docker-compose.yml\" up -d"
+)
 
-        # Create directory where license script (Windows/Linux are stored)
-        mkdir -p $VGPU_DIR/licenses
+    echo "$compose_yaml" | pct exec $CTID -- tee /opt/docker/fastapi-dls/docker-compose.yml > /dev/null
+    pct exec $CTID -- docker volume create dls-db
+    pct exec $CTID -- docker-compose -f /opt/docker/fastapi-dls/docker-compose.yml up -d
 
-        echo -e "${GREEN}[+]${NC} Generate FastAPI-DLS Windows/Linux executables"
-        # Create .sh file for Linux
-        cat > "$VGPU_DIR/licenses/license_linux.sh" <<EOF
+    mkdir -p $VGPU_DIR/licenses
+    cat > "$VGPU_DIR/licenses/license_linux.sh" <<EOF
 #!/bin/bash
-
-curl --insecure -L -X GET https://$hostname:$portnumber/-/client-token -o /etc/nvidia/ClientConfigToken/client_configuration_token_\$(date '+%d-%m-%Y-%H-%M-%S').tok
+curl --insecure -L -X GET https://$CT_IP:$portnumber/-/client-token -o /etc/nvidia/ClientConfigToken/client_configuration_token_\$(date '+%d-%m-%Y-%H-%M-%S').tok
 service nvidia-gridd restart
 nvidia-smi -q | grep "License"
 EOF
 
-        # Create .ps1 file for Windows
-        cat > "$VGPU_DIR/licenses/license_windows.ps1" <<EOF
-curl.exe --insecure -L -X GET https://$hostname:$portnumber/-/client-token -o "C:\Program Files\NVIDIA Corporation\vGPU Licensing\ClientConfigToken\client_configuration_token_\$(Get-Date -f 'dd-MM-yy-hh-mm-ss').tok"
+    cat > "$VGPU_DIR/licenses/license_windows.ps1" <<EOF
+curl.exe --insecure -L -X GET https://$CT_IP:$portnumber/-/client-token -o "C:\Program Files\NVIDIA Corporation\vGPU Licensing\ClientConfigToken\client_configuration_token_\$(Get-Date -f 'dd-MM-yy-hh-mm-ss').tok"
 Restart-Service NVDisplay.ContainerLocalSystem
 & 'nvidia-smi' -q  | Select-String "License"
 EOF
 
-        echo -e "${GREEN}[+]${NC} license_windows.ps1 and license_linux.sh created and stored in: $VGPU_DIR/licenses"
-        echo -e "${YELLOW}[-]${NC} Copy these files to your Windows or Linux VM's and execute"
-        echo ""
-        echo "Exiting script."
-        echo ""
-        exit 0
-
-        # Put the stuff below in here
-    elif [ "$choice" = "n" ]; then
-        echo ""
-        echo "Exiting script."
-        echo "Install the Docker container in a VM/LXC yourself."
-        echo "By using this guide: https://git.collinwebdesigns.de/oscar.krause/fastapi-dls#docker"
-        echo ""
-        exit 0
-
-        # Write instruction on how to setup Docker in a VM/LXC container
-        # Echo .yml script and docker-compose instructions
-    else
-        echo -e "${RED}[!]${NC} Invalid choice. Please enter (y/n)."
-        exit 1
-    fi
+    echo -e "${GREEN}[+]${NC} license_windows.ps1 and license_linux.sh created and stored in: $VGPU_DIR/licenses"
+    echo -e "${YELLOW}[-]${NC} Copy these files to your Windows or Linux VM's and execute"
+    echo ""
+    echo "FastAPI-DLS is running at: https://$CT_IP:$portnumber"
+    echo ""
 }
 
 # Check for root
@@ -307,58 +304,6 @@ case $STEP in
             fi
             echo ""
 
-            # Function to replace repository lines
-            replace_repo_lines() {
-                local old_repo="$1"
-                local new_repo="$2"
-                # Check /etc/apt/sources.list
-                if grep -q "$old_repo" /etc/apt/sources.list; then
-                    sed -i "s|$old_repo|$new_repo|" /etc/apt/sources.list
-                fi
-                # Check files under /etc/apt/sources.list.d/
-                for file in /etc/apt/sources.list.d/*; do
-                    if [ -f "$file" ]; then
-                        if grep -q "$old_repo" "$file"; then
-                            sed -i "s|$old_repo|$new_repo|" "$file"
-                        fi
-                    fi
-                done
-            }
-
-            # Commands for new installation
-            echo -e "${GREEN}[+]${NC} Making changes to APT for Proxmox version: ${RED}$major_version${NC}"
-            case $major_version in
-                8)
-                    proxmox_repo="deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription"
-                    ;;
-                7)
-                    proxmox_repo="deb http://download.proxmox.com/debian/pve bullseye pve-no-subscription"
-                    ;;
-                *)
-                    echo -e "${RED}[!]${NC} Unsupported Proxmox version: ${YELLOW}$major_version${NC}"
-                    exit 1
-                    ;;
-            esac
-
-            # Replace repository lines
-            replace_repo_lines "deb https://enterprise.proxmox.com/debian/pve bullseye pve-enterprise" "$proxmox_repo"
-            replace_repo_lines "deb https://enterprise.proxmox.com/debian/pve bookworm pve-enterprise" "$proxmox_repo"
-            replace_repo_lines "deb https://enterprise.proxmox.com/debian/ceph-quincy bookworm enterprise" "deb http://download.proxmox.com/debian/ceph-quincy bookworm no-subscription"
-
-            # Check if Proxmox repository entry exists in /etc/apt/sources.list
-            if ! grep -q "$proxmox_repo" /etc/apt/sources.list; then
-                echo -e "${GREEN}[+]${NC} Adding Proxmox repository entry to /etc/apt/sources.list${NC}"
-                echo "$proxmox_repo" >> /etc/apt/sources.list
-            fi
-
-            # # Comment Proxmox enterprise repository
-            # echo -e "${GREEN}[+]${NC} Commenting Proxmox enterprise repository"
-            # sed -i 's/^/#/' /etc/apt/sources.list.d/pve-enterprise.list
-
-            # # Replace ceph-quincy enterprise for non-subscribtion
-            # echo -e "${GREEN}[+]${NC} Set Ceph to no-subscription"
-            # sed -i 's#^enterprise #no-subscription#' /etc/apt/sources.list.d/ceph.list
-
             # APT update/upgrade
             run_command "Running APT Update" "info" "apt update"
 
@@ -375,40 +320,7 @@ case $STEP in
                 echo -e "${YELLOW}[-]${NC} Skipping APT Dist-Upgrade"
             fi          
 
-            # APT installing packages
-            # Downgrade kernel and headers for Nvidia drivers to install successfully
-            # apt install proxmox-kernel-6.5 proxmox-headers-6.5
-            # used to be pve-headers, but that will use latest version (which is currently 6.8)
-            run_command "Installing packages" "info" "apt install -y git build-essential dkms proxmox-kernel-6.5 proxmox-headers-6.5 mdevctl megatools"
-
-            # Pinning the kernel
-            kernel_version_compare() {
-                ver1=$1
-                ver2=$2
-                printf '%s\n' "$ver1" "$ver2" | sort -V -r | head -n 1
-            }
-
-            # Get the kernel list and filter for 6.5 kernels
-            kernel_list=$(proxmox-boot-tool kernel list | grep "6.5")
-
-            # Check if any 6.5 kernels are available
-            if [[ -n "$kernel_list" ]]; then
-                # Extract the highest version
-                highest_version=""
-                while read -r line; do
-                    kernel_version=$(echo "$line" | awk '{print $1}')
-                    if [[ -z "$highest_version" ]]; then
-                        highest_version="$kernel_version"
-                    else
-                        highest_version=$(kernel_version_compare "$highest_version" "$kernel_version")
-                    fi
-                done <<< "$kernel_list"
-
-                # Pin the highest 6.5 kernel
-                run_command "Pinning kernel: $highest_version" "info" "proxmox-boot-tool kernel pin $highest_version"
-            else
-                echo -e "${RED}[!]${NC} No 6.5 kernels installed."
-            fi
+            run_command "Installing packages" "info" "apt install -y git build-essential dkms mdevctl megatools"
 
             # Running NVIDIA GPU checks
             query_gpu_info() {
@@ -816,31 +728,25 @@ case $STEP in
             # Offer to download vGPU driver versions based on Proxmox version
             if [[ "$major_version" == "8" ]]; then
                 echo -e "${GREEN}[+]${NC} You are running Proxmox version $version"
-                echo -e "${GREEN}[+]${NC} Highly recommended that you download driver 17.0 or 16.x"
+                echo -e "${GREEN}[+]${NC} Highly recommended that you download driver 17.5"
             elif [[ "$major_version" == "7" ]]; then
                 echo -e "${GREEN}[+]${NC} You are running Proxmox version $version"
-                echo -e "${GREEN}[+]${NC} Highly recommended that you download driver 16.x"
+                echo -e "${GREEN}[+]${NC} Highly recommended that you download driver 16.9"
             fi
 
             echo ""
             echo "Select vGPU driver version:"
             echo ""
-            echo "1: 17.0 (550.54.10)"
-            echo "2: 16.4 (535.161.05)"
-            echo "3: 16.2 (535.129.03)"
-            echo "4: 16.1 (535.104.06)"
-            echo "5: 16.0 (535.54.06)"
+            echo "1: 17.5 (550.144.02)"
+            echo "2: 16.9 (535.230.02)"
             echo ""
 
             read -p "Enter your choice: " driver_choice
 
             # Validate the chosen filename against the compatibility map
             case $driver_choice in
-                1) driver_filename="NVIDIA-Linux-x86_64-550.54.10-vgpu-kvm.run" ;;
-                2) driver_filename="NVIDIA-Linux-x86_64-535.161.05-vgpu-kvm.run" ;;
-                3) driver_filename="NVIDIA-Linux-x86_64-535.129.03-vgpu-kvm.run" ;;
-                4) driver_filename="NVIDIA-Linux-x86_64-535.104.06-vgpu-kvm.run" ;;
-                5) driver_filename="NVIDIA-Linux-x86_64-535.54.06-vgpu-kvm.run" ;;
+                1) driver_filename="NVIDIA-Linux-x86_64-550.144.02-vgpu-kvm.run" ;;
+                2) driver_filename="NVIDIA-Linux-x86_64-535.230.02-vgpu-kvm.run" ;;
                 *) 
                     echo "Invalid choice. Please enter a valid option."
                     exit 1
@@ -860,20 +766,11 @@ case $STEP in
        
             # Set the driver URL
             case "$driver_version" in
-                17.0)
-                    driver_url="https://mega.nz/file/JjtyXRiC#cTIIvOIxu8vf-RdhaJMGZAwSgYmqcVEKNNnRRJTwDFI"
+                17.5)
+                    driver_url="https://mega.nz/file/v5B1ECTI#KqAJ_2LDS4jfC7EQAUElY6jznf-PG8LxN3nI8yTxkds"
                     ;;
-                16.4)
-                    driver_url="https://mega.nz/file/RvsyyBaB#7fe_caaJkBHYC6rgFKtiZdZKkAvp7GNjCSa8ufzkG20"
-                    ;;
-                16.2)
-                    driver_url="https://mega.nz/file/EyEXTbbY#J9FUQL1Mo4ZpNyDijStEH4bWn3AKwnSAgJEZcxUnOiQ"
-                    ;;
-                16.1)
-                    driver_url="https://mega.nz/file/wy1WVCaZ#Yq2Pz_UOfydHy8nC_X_nloR4NIFC1iZFHqJN0EiAicU"
-                    ;;
-                16.0)
-                    driver_url="https://mega.nz/file/xrNCCAaT#UuUjqRap6urvX4KA1m8-wMTCW5ZwuWKUj6zAB4-NPSo"
+                16.9)
+                    driver_url="https://mega.nz/file/i9oV1D4A#8k5WwxttXxIE6X8VEH2qYO_UeUqvqIR6OMZwheVVq9U"
                     ;;
             esac
 
@@ -895,10 +792,10 @@ case $STEP in
                 exit 1
             fi
 
-            # Check MD5 hash of the downloaded file
-            downloaded_md5=$(md5sum "$driver_filename" | awk '{print $1}')
-            if [ "$downloaded_md5" != "$md5" ]; then
-                echo -e "${RED}[!]${NC} MD5 checksum mismatch. Downloaded file is corrupt."
+            # Check SHA256 hash of the downloaded file
+            downloaded_sha256=$(sha256sum "$driver_filename" | awk '{print $1}')
+            if [ "$downloaded_256" != "$sha256" ]; then
+                echo -e "${RED}[!]${NC} SHA256 checksum mismatch. Downloaded file is corrupt."
                 echo ""
                 read -p "$(echo -e "${BLUE}[?]${NC} Do you want to continue? (y/n): ")" choice
                 echo ""
@@ -907,17 +804,17 @@ case $STEP in
                     exit 1
                 fi
             else
-                echo -e "${GREEN}[+]${NC} MD5 checksum matched. Downloaded file is valid."
+                echo -e "${GREEN}[+]${NC} SHA256 checksum matched. Downloaded file is valid."
             fi
 
             exit 0
             ;;
         5)  
             echo ""
-            echo "This will setup a FastAPI-DLS Nvidia vGPU licensing server on this Proxmox server"         
+            echo "This will setup a FastAPI-DLS Nvidia vGPU licensing server in an LXC container on this Proxmox server"         
             echo ""
 
-            configure_fastapi_dls
+            configure_fastapi_dls_lxc
             
             exit 0
             ;;
@@ -1043,29 +940,26 @@ case $STEP in
             if [[ "$major_version" == "8" ]]; then
                 echo -e "${YELLOW}[-]${NC} You are running Proxmox version $version"
                 if contains_version "17" && contains_version "16"; then
-                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver versions 17.0 and 16.x"
+                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver versions 17.5 and 16.9"
                 elif contains_version "17"; then
-                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver version 17.0"
+                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver version 17.5"
                 elif contains_version "16"; then
-                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver version 16.x"
+                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver version 16.9"
                 fi
             elif [[ "$major_version" == "7" ]]; then
                 echo -e "${YELLOW}[-]${NC} You are running Proxmox version $version"
                 if contains_version "17" && contains_version "16"; then
-                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver versions 17.0 and 16.x"
+                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver versions 17.5 and 16.9"
                 elif contains_version "16"; then
-                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver version 16.x"
+                    echo -e "${YELLOW}[-]${NC} Your Nvidia GPU is supported by driver version 16.9"
                 fi
             fi
 
             echo ""
             echo "Select vGPU driver version:"
             echo ""
-            echo "1: 17.0 (550.54.10)"
-            echo "2: 16.4 (535.161.05)"
-            echo "3: 16.2 (535.129.03)"
-            echo "4: 16.1 (535.104.06)"
-            echo "5: 16.0 (535.54.06)"
+            echo "1: 17.5 (550.144.02)"
+            echo "2: 16.9 (535.230.02)"
             echo ""
 
             read -p "Enter your choice: " driver_choice
@@ -1074,11 +968,8 @@ case $STEP in
 
             # Validate the chosen filename against the compatibility map
             case $driver_choice in
-                1) driver_filename="NVIDIA-Linux-x86_64-550.54.10-vgpu-kvm.run" ;;
-                2) driver_filename="NVIDIA-Linux-x86_64-535.161.05-vgpu-kvm.run" ;;
-                3) driver_filename="NVIDIA-Linux-x86_64-535.129.03-vgpu-kvm.run" ;;
-                4) driver_filename="NVIDIA-Linux-x86_64-535.104.06-vgpu-kvm.run" ;;
-                5) driver_filename="NVIDIA-Linux-x86_64-535.54.06-vgpu-kvm.run" ;;
+                1) driver_filename="NVIDIA-Linux-x86_64-550.144.02-vgpu-kvm.run" ;;
+                2) driver_filename="NVIDIA-Linux-x86_64-535.230.02-vgpu-kvm.run" ;;
                 *) 
                     echo "Invalid choice. Please enter a valid option."
                     exit 1
@@ -1097,20 +988,11 @@ case $STEP in
             # Set the driver URL if not provided
             if [ -z "$URL" ]; then
                 case "$driver_version" in
-                    17.0)
-                        driver_url="https://mega.nz/file/JjtyXRiC#cTIIvOIxu8vf-RdhaJMGZAwSgYmqcVEKNNnRRJTwDFI"
+                    17.5)
+                        driver_url="https://mega.nz/file/v5B1ECTI#KqAJ_2LDS4jfC7EQAUElY6jznf-PG8LxN3nI8yTxkds"
                         ;;
-                    16.4)
-                        driver_url="https://mega.nz/file/RvsyyBaB#7fe_caaJkBHYC6rgFKtiZdZKkAvp7GNjCSa8ufzkG20"
-                        ;;
-                    16.2)
-                        driver_url="https://mega.nz/file/EyEXTbbY#J9FUQL1Mo4ZpNyDijStEH4bWn3AKwnSAgJEZcxUnOiQ"
-                        ;;
-                    16.1)
-                        driver_url="https://mega.nz/file/wy1WVCaZ#Yq2Pz_UOfydHy8nC_X_nloR4NIFC1iZFHqJN0EiAicU"
-                        ;;
-                    16.0)
-                        driver_url="https://mega.nz/file/xrNCCAaT#UuUjqRap6urvX4KA1m8-wMTCW5ZwuWKUj6zAB4-NPSo"
+                    16.9)
+                        driver_url="https://mega.nz/file/i9oV1D4A#8k5WwxttXxIE6X8VEH2qYO_UeUqvqIR6OMZwheVVq9U"
                         ;;
                 esac
             fi
@@ -1133,10 +1015,10 @@ case $STEP in
                 exit 1
             fi
 
-            # Check MD5 hash of the downloaded file
-            downloaded_md5=$(md5sum "$driver_filename" | awk '{print $1}')
-            if [ "$downloaded_md5" != "$md5" ]; then
-                echo -e "${RED}[!]${NC}  MD5 checksum mismatch. Downloaded file is corrupt."
+            # Check SHA256 hash of the downloaded file
+            downloaded_sha256=$(sha256sum "$driver_filename" | awk '{print $1}')
+            if [ "$downloaded_sha256" != "$sha256" ]; then
+                echo -e "${RED}[!]${NC}  SHA256 checksum mismatch. Downloaded file is corrupt."
                 echo ""
                 read -p "$(echo -e "${BLUE}[?]${NC}Do you want to continue? (y/n): ")" choice
                 echo ""
@@ -1145,7 +1027,7 @@ case $STEP in
                     exit 1
                 fi
             else
-                echo -e "${GREEN}[+]${NC} MD5 checksum matched. Downloaded file is valid."
+                echo -e "${GREEN}[+]${NC} SHA256 checksum matched. Downloaded file is valid."
             fi
         fi
 
@@ -1200,26 +1082,14 @@ case $STEP in
         run_command "Enable nvidia-vgpu-mgr.service" "info" "systemctl enable --now nvidia-vgpu-mgr.service"
 
         # Check DRIVER_VERSION against specific driver filenames
-        if [ "$driver_filename" == "NVIDIA-Linux-x86_64-550.54.10-vgpu-kvm.run" ]; then
-            echo -e "${GREEN}[+]${NC} In your VM download Nvidia guest driver for version: 550.54.10"
-            echo -e "${YELLOW}[-]${NC} Linux: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU17.0/NVIDIA-Linux-x86_64-550.54.14-grid.run"
-            echo -e "${YELLOW}[-]${NC} Windows: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU17.0/551.61_grid_win10_win11_server2022_dch_64bit_international.exe"
-        elif [ "$driver_filename" == "NVIDIA-Linux-x86_64-535.161.05-vgpu-kvm.run" ]; then
-            echo -e "${GREEN}[+]${NC} In your VM download Nvidia guest driver for version: 535.161.05"
-            echo -e "${YELLOW}[-]${NC} Linux: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.4/NVIDIA-Linux-x86_64-535.161.07-grid.run"
-            echo -e "${YELLOW}[-]${NC} Windows: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.4/538.33_grid_win10_win11_server2019_server2022_dch_64bit_international.exe"
-        elif [ "$driver_filename" == "NVIDIA-Linux-x86_64-535.129.03-vgpu-kvm.run" ]; then
-            echo -e "${GREEN}[+]${NC} In your VM download Nvidia guest driver for version: 535.129.03"
-            echo -e "${YELLOW}[-]${NC} Linux: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.2/NVIDIA-Linux-x86_64-535.129.03-grid.run"
-            echo -e "${YELLOW}[-]${NC} Windows: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.2/537.70_grid_win10_win11_server2019_server2022_dch_64bit_international.exe"
-        elif [ "$driver_filename" == "NVIDIA-Linux-x86_64-535.104.06-vgpu-kvm.run" ]; then
-            echo -e "${GREEN}[+]${NC} In your VM download Nvidia guest driver for version: 535.104.06"
-            echo -e "${YELLOW}[-]${NC} Linux: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.1/NVIDIA-Linux-x86_64-535.104.05-grid.run"
-            echo -e "${YELLOW}[-]${NC} Windows: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.1/537.13_grid_win10_win11_server2019_server2022_dch_64bit_international.exe"
-        elif [ "$driver_filename" == "NVIDIA-Linux-x86_64-535.54.06-vgpu-kvm.run" ]; then
-            echo -e "${GREEN}[+]${NC} In your VM download Nvidia guest driver for version: 535.54.06"
-            echo -e "${YELLOW}[-]${NC} Linux: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.0/NVIDIA-Linux-x86_64-535.54.03-grid.run"
-            echo -e "${YELLOW}[-]${NC} Windows: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.0/536.25_grid_win10_win11_server2019_server2022_dch_64bit_international.exe"
+        if [ "$driver_filename" == "NVIDIA-Linux-x86_64-550.144.02-vgpu-kvm.run" ]; then
+            echo -e "${GREEN}[+]${NC} In your VM download Nvidia guest driver for version: 550.144.02"
+            echo -e "${YELLOW}[-]${NC} Linux: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU17.5/NVIDIA-Linux-x86_64-550.144.03-grid.run"
+            echo -e "${YELLOW}[-]${NC} Windows: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU17.5/553.62_grid_win10_win11_server2019_server2022_dch_64bit_international.exe"
+        elif [ "$driver_filename" == "NVIDIA-Linux-x86_64-535.230.02-vgpu-kvm.run" ]; then
+            echo -e "${GREEN}[+]${NC} In your VM download Nvidia guest driver for version: 535.230.02"
+            echo -e "${YELLOW}[-]${NC} Linux: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.9/NVIDIA-Linux-x86_64-535.230.02-grid.run"
+            echo -e "${YELLOW}[-]${NC} Windows: https://storage.googleapis.com/nvidia-drivers-us-public/GRID/vGPU16.9/539.19_grid_win10_win11_server2019_server2022_dch_64bit_international.exe"
         else
             echo -e "${RED}[!]${NC} Unknown driver version: $driver_filename"
         fi
@@ -1237,7 +1107,7 @@ case $STEP in
         rm -f "$VGPU_DIR/$CONFIG_FILE" 
 
         # Option to license the vGPU
-        configure_fastapi_dls
+        configure_fastapi_dls_lxc
         ;;
     *)
         echo "Invalid installation step. Please check the script."
