@@ -562,12 +562,12 @@ case $STEP in
                 run_command "Updating GRUB" "info" "update-grub"
             }
 
-            if [ "$choice" -eq 1 ]; then
+            if [ "$choice" -eq 1000 ]; then
                 # Check the value of VGPU_SUPPORT
                 if [ "$VGPU_SUPPORT" = "No" ]; then
                     echo -e "${RED}[!]${NC} You don't have a vGPU capable card in your system"
                     echo "Exiting  script."
-                    #exit 1
+                    exit 1
                 elif [ "$VGPU_SUPPORT" = "Yes" ]; then
                     # Download vgpu-proxmox
                     rm -rf $VGPU_DIR/vgpu-proxmox 2>/dev/null 
